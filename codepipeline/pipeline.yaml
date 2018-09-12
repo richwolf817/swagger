@@ -164,7 +164,6 @@ Resources:
 
         - Name: Validate
           Actions:
-
           - Name: CodeBuild
             InputArtifacts:
             - Name: Source
@@ -209,7 +208,7 @@ Resources:
             OutputArtifacts:
             - Name: ValidatedTestStack
             Configuration:
-              ProjectName: !Ref TestDeploy
+              ProjectName: !Ref CodeBuild
             RunOrder: 3
 
           - Name: DeleteTestStack

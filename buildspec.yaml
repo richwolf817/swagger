@@ -1,0 +1,17 @@
+version: 0.1
+
+phases:
+  install:
+    commands:
+      npm install jsonlint -g
+  pre_build:
+    commands:
+      - echo "Validating CFN templates"
+
+  build:
+    commands:
+      - echo "Copying child stack templates to S3"
+
+artifacts:
+  files:
+    - master-stack.yml
