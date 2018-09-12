@@ -1,0 +1,325 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Continuous Delivery pipeline for static website'
+Parameters:
+  ApplicationName: 
+    Description: This will be used to name the pipeline and build resources
+    Type: String
+    Default: "richards-app"
+  GitHubOwner:
+    Description: 'The owner of the GitHub repository.'
+    Type: String
+    Default: "richwolf817"
+  GitHubRepo:
+    Description: 'The GitHub repository.'
+    Type: String
+    Default: "CodePipeline-Application"
+  GitHubBranch:
+    Type: String
+    Description: GitHub Branch
+    Default: "master"
+  GitHubOAuthToken:
+    Description: 'The OAuthToken of the GitHub user.'
+    Type: String
+  BuildImage:
+    Description: The build image to use for building the app  
+    Type: String
+    Default: "aws/codebuild/ubuntu-base:14.04"
+  BuildType:
+    Type: String
+    Default: "LINUX_CONTAINER"
+    Description: The build container type to use for building the app
+  BuildComputeType:
+    Type: String
+    Default: "BUILD_GENERAL1_SMALL"
+    Description: The build compute type to use for building the app
+  UATTopic:
+    Type: String
+    Default: "hot-topic"
+    Description: Name of the SNS topic in same region to send UAT approval notification.
+
+
+Resources:
+  ArtifactStore:
+    Type: "AWS::S3::Bucket"
+    Properties: 
+      VersioningConfiguration:
+        Status: Enabled
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+                - cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudPipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "cloudformation:*"
+                Resource: "*"
+              - Effect: Allow
+                Action: "codecommit:*"
+                Resource: "*"
+              - Effect: Allow
+                Action: "s3:*"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                Resource: "*"
+              - Effect: "Allow"
+                Action: "sns:Publish"
+                Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${UATTopic}
+             
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: codebuild-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: "*"
+            Resource: "*"
+          Version: '2012-10-17'
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'lambda.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Path: '/'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+      - PolicyName: codepipeline
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - codepipeline:PutJobFailureResult
+            - codepipeline:PutJobSuccessResult
+            Resource: "*"
+            Effect: Allow
+
+  CodePipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      Name: richards-pipeline
+      ArtifactStore:
+        Location: !Ref ArtifactStore
+        Type: S3
+      RoleArn: !Sub '${PipelineRole.Arn}'
+      Stages:
+        - Name: Source
+          Actions: 
+          - Name: Source
+            ActionTypeId:
+              Category: Source 
+              Owner: ThirdParty 
+              Version: 1 
+              Provider: GitHub
+            OutputArtifacts:
+            - Name: Source
+            Configuration:
+              Owner: !Ref GitHubOwner
+              Repo: !Ref GitHubRepo
+              Branch: master
+              OAuthToken: !Ref GitHubOAuthToken
+
+        - Name: ChangeSet
+          Actions:
+            - Name: CreateChangeSet
+              InputArtifacts:
+              - Name: Source
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+              - Name: CreatedChangeSet
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: UATCBChangeSet
+                RoleArn: !Sub '${PipelineRole.Arn}'
+                Capabilities: CAPABILITY_NAMED_IAM
+                StackName: !Sub UAT-${AWS::StackName}
+                TemplatePath: Source::multiBucket.yaml
+              RunOrder: 1
+
+            - Name: ExecuteChangeSet
+              InputArtifacts:
+                - Name: CreatedChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+              - Name: DeployedUAT
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: UATCBChangeSet
+                StackName: !Sub UAT-${AWS::StackName}
+              RunOrder: 3
+
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${UATTopic}
+                CustomData: Approve once completed.
+              RunOrder: 2
+
+        - Name: LambdaTest
+          Actions:
+          - Name: Test
+            ActionTypeId:
+              Category: Invoke 
+              Owner: AWS 
+              Version: 1 
+              Provider: Lambda
+            Configuration:
+              FunctionName: !Ref TestLambda
+              UserParameters: !Sub 'https://stelligent.com'
+
+        - Name: Build
+          Actions:
+          - Name: CodeBuild
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId: 
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: Built
+            Configuration: 
+              ProjectName: !Ref CodeBuild
+
+        - Name: Deploy
+          Actions:
+            - Name: DeployStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: Built
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt [PipelineRole, Arn]
+                StackName: S3deploy
+                Capabilities: CAPABILITY_IAM
+                TemplatePath: Built::multiBucket.yaml
+
+        - Name: Test
+          Actions:
+          - Name: TestDeploy
+            InputArtifacts:
+            - Name: Built
+            ActionTypeId: 
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: Test
+            Configuration: 
+              ProjectName: !Ref TestDeploy
+
+          
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildRole
+    Properties:
+      Name: !Sub ${AWS::StackName}-BuildSite
+      Description: Just Messing around
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: !Ref BuildType
+        ComputeType: !Ref BuildComputeType
+        Image: !Ref BuildImage
+      Artifacts:
+        Name: !Ref ApplicationName
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+
+  TestDeploy:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ValidateResource-${AWS::StackName}
+      Description: Test build to validate the resources created by CFN templates
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Environment:
+        Type: !Ref BuildType
+        ComputeType: !Ref BuildComputeType
+        Image: !Ref BuildImage
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: "buildspec-test.yaml"
+      Artifacts:
+        Name: !Ref ApplicationName
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+
+
+  TestLambda:
+    Type: "AWS::Lambda::Function"
+    Properties: 
+      Code:
+        S3Bucket: 'codepipeline-codedeploy-richard-lambda'
+        S3Key: 'http.zip'
+      FunctionName: 'codepipeline_http_test'
+      Handler: 'index.handler'
+      MemorySize: 128
+      Role: !Sub '${LambdaRole.Arn}'
+      Runtime: 'nodejs4.3'
+      Timeout: 30
+
+Outputs:
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${CodePipeline}
+    Description: CodePipeline URL

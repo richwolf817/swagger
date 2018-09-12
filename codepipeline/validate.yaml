@@ -1,0 +1,65 @@
+        - Name: Validate
+          Actions:
+
+          - Name: CodeBuild
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: CFNTemplateArtifact
+            Configuration:
+              ProjectName: !Ref CodeBuild
+            RunOrder: 1
+
+          - Name: CreateTestCFNStack
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            OutputArtifacts:
+            - Name: CreatedTestCFNStack
+            Configuration:
+              ActionMode: CREATE_UPDATE
+              RoleArn:  !Sub '${PipelineRole.Arn}'
+              Capabilities: CAPABILITY_NAMED_IAM
+              StackName: !Sub Test-${AWS::StackName}
+              TemplateConfiguration: Source::dev.conf
+              TemplatePath: Source::multiBucket.yaml
+            RunOrder: 2
+
+          - Name: ValidateTestStack
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: ValidatedTestStack
+            Configuration:
+              ProjectName: !Ref TestDeploy
+            RunOrder: 3
+
+          - Name: DeleteTestStack
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            OutputArtifacts:
+            - Name: ProceedToUAT
+            Configuration:
+              StackName: !Sub Test-${AWS::StackName}
+              ActionMode: DELETE_ONLY
+              RoleArn: !Sub '${PipelineRole.Arn}'
+            RunOrder: 4
