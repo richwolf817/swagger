@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Serverless Application Model Example with Inline Swagger API Definition
+Resources:
+
+  MovieTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+          Name: id
+          Type: String
+      TableName: Movies
+
+  StoreMovieFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      CodeUri: src/put/
+      Timeout: 15
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MovieTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MovieTable
+      Events:
+        StoreApi:
+          Type: Api
+          Properties:
+            Path: /movie
+            Method: POST
+            RestApiId:
+                Ref: MyApi
+
+  GetMovieFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      CodeUri: src/get/
+      Timeout: 15
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MovieTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MovieTable
+      Events:
+        GetByQueryApi:
+          Type: Api
+          Properties:
+            Path: /movie
+            Method: GET
+            RestApiId:
+                Ref: MyApi
+            
+  MyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          title: "MovieAPI"
+        paths:
+          /movie:
+            get:
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetMovieFunction.Arn}/invocations
+                responses: {}
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StoreMovieFunction.Arn}/invocations
+                responses: {}
+                httpMethod: POST
+                type: aws_proxy

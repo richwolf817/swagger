@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  BucketName:
+    Type: String
+    Default: "richard-magic-glory"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Site Configuration"
+        Parameters:
+          - BucketName
+    ParameterLabels:
+      BucketName:
+        default: Name of S3 Bucket to create for website hosting
+
+Resources:
+  StaticExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ['logs:*']
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action: "s3:*"
+                Resource: "*"
+
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      AccessControl: PublicRead
+      BucketName: !Ref BucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+  
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref SiteBucket
+                - /*
+      Bucket: !Ref SiteBucket
+                
+  StaticFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          var AWS = require('aws-sdk');
+          var response = require('cfn-response');
+          AWS.config.update({region: 'ap-south-1'});
+          exports.handler = function(event, context) {
+            var bucketName = 'richards-swagger-deploy';
+            var destBucket = process.env.BUCKET_NAME;
+            var input = parseInt(event.ResourceProperties.Input);
+            var responseData = {Value: input * 5};
+            var s3 = new AWS.S3();
+            var params = {
+              Bucket: bucketName,
+              Prefix: 'dist',
+            };
+            s3.listObjects(params, function(err, data) {
+              console.log(data);
+              data.Contents.forEach(function(file){
+                var params2 = {
+                  CopySource: bucketName + '/' + file.Key,
+                  Key: file.Key.replace('dist/', ''),
+                  Bucket: destBucket
+                };
+                AWS.config.update({region: 'us-west-2'});
+                s3.copyObject(params2, function(copyErr, copyData){
+                 if (err)
+                  console.log(err)
+                  else
+                    console.log("Successfully saved object to richard");
+                });
+              });
+            response.send(event, context, response.SUCCESS, responseData);
+            });
+          };
+      Handler: index.handler
+      Runtime: nodejs8.10
+      Role: !GetAtt StaticExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+
+  InlineLambda:
+    Type: Custom::InlineLambda
+    DependsOn: StaticFunction
+    Properties:
+      ServiceToken: !GetAtt StaticFunction.Arn
+
+  StaticFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt StaticFunction.Arn
+      Principal: 'cloudformation.amazonaws.com'
+
+Outputs:
+  SiteUrl:
+    Value: !GetAtt [SiteBucket, WebsiteURL]
+    Description: S3 Website URL
+
+
+
