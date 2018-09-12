@@ -13,14 +13,15 @@ Parameters:
   GitHubRepo:
     Description: 'The GitHub repository.'
     Type: String
-    Default: "CodePipeline-Application"
+    Default: "swagger"
   GitHubBranch:
     Type: String
     Description: GitHub Branch
     Default: "master"
   GitHubOAuthToken:
     Description: 'The OAuthToken of the GitHub user.'
-    Type: String
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: 'github-pipeline'
   BuildImage:
     Description: The build image to use for building the app  
     Type: String
@@ -33,7 +34,7 @@ Parameters:
     Type: String
     Default: "BUILD_GENERAL1_SMALL"
     Description: The build compute type to use for building the app
-  UATTopic:
+  ApproveTopic:
     Type: String
     Default: "hot-topic"
     Description: Name of the SNS topic in same region to send UAT approval notification.
@@ -87,7 +88,7 @@ Resources:
                 Resource: "*"
               - Effect: "Allow"
                 Action: "sns:Publish"
-                Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${UATTopic}
+                Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ApproveTopic}
              
   CodeBuildRole:
     Type: AWS::IAM::Role
@@ -161,6 +162,72 @@ Resources:
               Branch: master
               OAuthToken: !Ref GitHubOAuthToken
 
+        - Name: Validate
+          Actions:
+
+          - Name: CodeBuild
+            InputArtifacts:
+            - Name: Source
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: CFNTemplateArtifact
+            Configuration:
+              ProjectName: !Ref CodeBuild
+            RunOrder: 1
+
+          - Name: CreateTestCFNStack
+            InputArtifacts:
+            - Name: CFNTemplateArtifact
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            OutputArtifacts:
+            - Name: CreatedTestCFNStack
+            Configuration:
+              ActionMode: CREATE_UPDATE
+              RoleArn:  !Sub '${PipelineRole.Arn}'
+              Capabilities: CAPABILITY_NAMED_IAM
+              StackName: !Sub Test-${AWS::StackName}
+#              TemplateConfiguration: Source::dev.conf
+              TemplatePath: CFNTemplateArtifact::template.yaml
+            RunOrder: 2
+
+          - Name: ValidateTestStack
+            InputArtifacts:
+            - Name: CreatedTestCFNStack
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            OutputArtifacts:
+            - Name: ValidatedTestStack
+            Configuration:
+              ProjectName: !Ref TestDeploy
+            RunOrder: 3
+
+          - Name: DeleteTestStack
+            InputArtifacts:
+            - Name: ValidatedTestStack
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            OutputArtifacts:
+            - Name: ProceedToUAT
+            Configuration:
+              StackName: !Sub Test-${AWS::StackName}
+              ActionMode: DELETE_ONLY
+              RoleArn: !Sub '${PipelineRole.Arn}'
+            RunOrder: 4
+
         - Name: ChangeSet
           Actions:
             - Name: CreateChangeSet
@@ -175,12 +242,23 @@ Resources:
               - Name: CreatedChangeSet
               Configuration:
                 ActionMode: CHANGE_SET_REPLACE
-                ChangeSetName: UATCBChangeSet
+                ChangeSetName: CFNChangeSet
                 RoleArn: !Sub '${PipelineRole.Arn}'
                 Capabilities: CAPABILITY_NAMED_IAM
-                StackName: !Sub UAT-${AWS::StackName}
-                TemplatePath: Source::multiBucket.yaml
+                StackName: !Sub CFNChangeSet-${AWS::StackName}
+                TemplatePath: Source::template.yaml
               RunOrder: 1
+
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ApproveTopic}
+                CustomData: Approve once completed.
+              RunOrder: 2
 
             - Name: ExecuteChangeSet
               InputArtifacts:
@@ -191,23 +269,12 @@ Resources:
                 Version: 1
                 Provider: CloudFormation
               OutputArtifacts:
-              - Name: DeployedUAT
+              - Name: Deployed
               Configuration:
                 ActionMode: CHANGE_SET_EXECUTE
-                ChangeSetName: UATCBChangeSet
-                StackName: !Sub UAT-${AWS::StackName}
+                ChangeSetName: CBChangeSet
+                StackName: !Sub CFNChangeSet-${AWS::StackName}
               RunOrder: 3
-
-            - Name: Approval
-              ActionTypeId:
-                Category: Approval
-                Owner: AWS
-                Version: 1
-                Provider: Manual
-              Configuration:
-                NotificationArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${UATTopic}
-                CustomData: Approve once completed.
-              RunOrder: 2
 
         - Name: LambdaTest
           Actions:
@@ -220,53 +287,6 @@ Resources:
             Configuration:
               FunctionName: !Ref TestLambda
               UserParameters: !Sub 'https://stelligent.com'
-
-        - Name: Build
-          Actions:
-          - Name: CodeBuild
-            InputArtifacts:
-            - Name: Source
-            ActionTypeId: 
-              Category: Build
-              Owner: AWS
-              Version: 1
-              Provider: CodeBuild
-            OutputArtifacts:
-            - Name: Built
-            Configuration: 
-              ProjectName: !Ref CodeBuild
-
-        - Name: Deploy
-          Actions:
-            - Name: DeployStack
-              ActionTypeId:
-                Category: Deploy
-                Owner: AWS
-                Provider: CloudFormation
-                Version: 1
-              InputArtifacts:
-                - Name: Built
-              Configuration:
-                ActionMode: CREATE_UPDATE
-                RoleArn: !GetAtt [PipelineRole, Arn]
-                StackName: S3deploy
-                Capabilities: CAPABILITY_IAM
-                TemplatePath: Built::multiBucket.yaml
-
-        - Name: Test
-          Actions:
-          - Name: TestDeploy
-            InputArtifacts:
-            - Name: Built
-            ActionTypeId: 
-              Category: Test
-              Owner: AWS
-              Version: 1
-              Provider: CodeBuild
-            OutputArtifacts:
-            - Name: Test
-            Configuration: 
-              ProjectName: !Ref TestDeploy
 
           
   CodeBuild:
@@ -287,25 +307,6 @@ Resources:
         Type: CODEPIPELINE
       TimeoutInMinutes: 10
 
-  TestDeploy:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: !Sub ValidateResource-${AWS::StackName}
-      Description: Test build to validate the resources created by CFN templates
-      ServiceRole: !GetAtt CodeBuildRole.Arn
-      Environment:
-        Type: !Ref BuildType
-        ComputeType: !Ref BuildComputeType
-        Image: !Ref BuildImage
-      Source:
-        Type: CODEPIPELINE
-        BuildSpec: "buildspec-test.yaml"
-      Artifacts:
-        Name: !Ref ApplicationName
-        Type: CODEPIPELINE
-      TimeoutInMinutes: 15
-
-
   TestLambda:
     Type: "AWS::Lambda::Function"
     Properties: 
@@ -316,7 +317,7 @@ Resources:
       Handler: 'index.handler'
       MemorySize: 128
       Role: !Sub '${LambdaRole.Arn}'
-      Runtime: 'nodejs4.3'
+      Runtime: 'nodejs8.10'
       Timeout: 30
 
 Outputs:
