@@ -164,7 +164,7 @@ Resources:
 
         - Name: Validate
           Actions:
-          - Name: CodeBuild
+          - Name: Package
             InputArtifacts:
             - Name: Source
             ActionTypeId:
@@ -178,7 +178,7 @@ Resources:
               ProjectName: !Ref CodeBuild
             RunOrder: 1
 
-          - Name: CreateTestCFNStack
+          - Name: CreateTestStack
             InputArtifacts:
             - Name: CFNTemplateArtifact
             ActionTypeId:
@@ -187,19 +187,19 @@ Resources:
               Version: 1
               Provider: CloudFormation
             OutputArtifacts:
-            - Name: CreatedTestCFNStack
+            - Name: CreatedTestStack
             Configuration:
               ActionMode: CREATE_UPDATE
               RoleArn:  !Sub '${PipelineRole.Arn}'
               Capabilities: CAPABILITY_NAMED_IAM
               StackName: !Sub Test-${AWS::StackName}
 #              TemplateConfiguration: Source::dev.conf
-              TemplatePath: CFNTemplateArtifact::template.yaml
+              TemplatePath: CFNTemplateArtifact::packaged.yaml
             RunOrder: 2
 
           - Name: ValidateTestStack
             InputArtifacts:
-            - Name: CreatedTestCFNStack
+            - Name: CreatedTestStack
             ActionTypeId:
               Category: Test
               Owner: AWS
@@ -220,32 +220,69 @@ Resources:
               Version: 1
               Provider: CloudFormation
             OutputArtifacts:
-            - Name: ProceedToUAT
+            - Name: Validated
             Configuration:
               StackName: !Sub Test-${AWS::StackName}
               ActionMode: DELETE_ONLY
               RoleArn: !Sub '${PipelineRole.Arn}'
             RunOrder: 4
 
-        - Name: ChangeSet
+        - Name: Stage
           Actions:
             - Name: CreateChangeSet
               InputArtifacts:
-              - Name: Source
+              - Name: Validated
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
                 Version: 1
                 Provider: CloudFormation
               OutputArtifacts:
-              - Name: CreatedChangeSet
+              - Name: StageChangeSet
               Configuration:
                 ActionMode: CHANGE_SET_REPLACE
-                ChangeSetName: CFNChangeSet
+                ChangeSetName: StageChangeSet
                 RoleArn: !Sub '${PipelineRole.Arn}'
                 Capabilities: CAPABILITY_NAMED_IAM
-                StackName: !Sub CFNChangeSet-${AWS::StackName}
-                TemplatePath: Source::template.yaml
+                StackName: !Sub StageChangeSet-${AWS::StackName}
+                TemplatePath: Validated::packaged.yaml
+              RunOrder: 1
+
+            - Name: ExecuteChangeSet
+              InputArtifacts:
+                - Name: StageChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+              - Name: StageDeploy
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: StageChangeSet
+                StackName: !Sub StageChangeSet-${AWS::StackName}
+              RunOrder: 2
+
+        - Name: Prodution
+          Actions:
+            - Name: CreateChangeSet
+              InputArtifacts:
+              - Name: StageDeploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+              - Name: ProdChangeSet
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: ProdChangeSet
+                RoleArn: !Sub '${PipelineRole.Arn}'
+                Capabilities: CAPABILITY_NAMED_IAM
+                StackName: !Sub ProdChangeSet-${AWS::StackName}
+                TemplatePath: StageDeploy::packaged.yaml
               RunOrder: 1
 
             - Name: Approval
@@ -261,21 +298,21 @@ Resources:
 
             - Name: ExecuteChangeSet
               InputArtifacts:
-                - Name: CreatedChangeSet
+                - Name: ProdChangeSet
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
                 Version: 1
                 Provider: CloudFormation
               OutputArtifacts:
-              - Name: Deployed
+              - Name: ProdDeploy
               Configuration:
                 ActionMode: CHANGE_SET_EXECUTE
-                ChangeSetName: CBChangeSet
-                StackName: !Sub CFNChangeSet-${AWS::StackName}
+                ChangeSetName: ProdChangeSet
+                StackName: !Sub ProdChangeSet-${AWS::StackName}
               RunOrder: 3
 
-        - Name: LambdaTest
+        - Name: SmokeTest
           Actions:
           - Name: Test
             ActionTypeId:
